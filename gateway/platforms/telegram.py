@@ -149,6 +149,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._polling_error_callback_ref = None
         # DM Topics: map of topic_name -> message_thread_id (populated at startup)
         self._dm_topics: Dict[str, int] = {}
+        # Group topic names: map of "chat_id:thread_id" -> topic_name (populated from forum_topic_created)
+        self._group_topic_names: Dict[str, str] = {}
         # DM Topics config from extra.dm_topics
         self._dm_topics_config: List[Dict[str, Any]] = self.config.extra.get("dm_topics", [])
         # Interactive model picker state per chat
@@ -2529,6 +2531,36 @@ class TelegramAdapter(BasePlatformAdapter):
                             topic_skill = topic.get("skill")
                             break
                     break
+
+            # Cache topic names from forum_topic_created service messages
+            if hasattr(message, "forum_topic_created") and message.forum_topic_created:
+                created_name = message.forum_topic_created.name
+                if created_name:
+                    cache_key = f"{chat.id}:{thread_id_str}"
+                    self._group_topic_names[cache_key] = created_name
+                    logger.info(
+                        "[%s] Cached group topic name: %s -> '%s'",
+                        self.name, cache_key, created_name,
+                    )
+                    if not chat_topic:
+                        chat_topic = created_name
+
+            # Also check forum_topic_edited for renames
+            if hasattr(message, "forum_topic_edited") and message.forum_topic_edited:
+                edited_name = message.forum_topic_edited.name
+                if edited_name:
+                    cache_key = f"{chat.id}:{thread_id_str}"
+                    self._group_topic_names[cache_key] = edited_name
+                    logger.info(
+                        "[%s] Updated group topic name: %s -> '%s'",
+                        self.name, cache_key, edited_name,
+                    )
+                    chat_topic = edited_name
+
+            # Fall back to cached group topic name if config didn't resolve it
+            if not chat_topic:
+                cache_key = f"{chat.id}:{thread_id_str}"
+                chat_topic = self._group_topic_names.get(cache_key)
 
         # Build source
         source = self.build_source(
