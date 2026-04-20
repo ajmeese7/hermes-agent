@@ -1398,8 +1398,12 @@ def _is_remote_session() -> bool:
 # =============================================================================
 
 def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
-    """Read Codex OAuth tokens from Hermes auth store (~/.hermes/auth.json).
+    """Read Codex OAuth tokens from Hermes auth state.
     
+    Prefer the provider state in ``~/.hermes/auth.json``. If that is empty,
+    fall back to the credential pool entry so ``hermes auth add openai-codex``
+    and runtime resolution stay in sync.
+
     Returns dict with 'tokens' (access_token, refresh_token) and 'last_refresh'.
     Raises AuthError if no Codex tokens are stored.
     """
@@ -1409,6 +1413,29 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     else:
         auth_store = _load_auth_store()
     state = _load_provider_state(auth_store, "openai-codex")
+    if not state:
+        pool = auth_store.get("credential_pool")
+        if isinstance(pool, dict):
+            entries = pool.get("openai-codex")
+            if isinstance(entries, list) and entries:
+                current = entries[0]
+                if isinstance(current, dict):
+                    access_token = str(current.get("access_token", "") or "").strip()
+                    refresh_token = str(current.get("refresh_token", "") or "").strip()
+                    if access_token and refresh_token:
+                        state = {
+                            "tokens": {
+                                "access_token": access_token,
+                                "refresh_token": refresh_token,
+                            },
+                            "last_refresh": current.get("last_refresh"),
+                            "auth_mode": current.get("auth_mode", "chatgpt"),
+                        }
+                        # Keep the provider state in sync so future lookups hit the
+                        # canonical location instead of re-reading the pool forever.
+                        auth_store = dict(auth_store)
+                        _save_provider_state(auth_store, "openai-codex", state)
+                        _save_auth_store(auth_store)
     if not state:
         raise AuthError(
             "No Codex credentials stored. Run `hermes auth` to authenticate.",
@@ -1447,7 +1474,12 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
 
 
 def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None) -> None:
-    """Save Codex OAuth tokens to Hermes auth store (~/.hermes/auth.json)."""
+    """Save Codex OAuth tokens to Hermes auth state (~/.hermes/auth.json).
+
+    The Codex login path stores entries in the credential pool. Keep the
+    provider state and pool entry synchronized so both auth listing and runtime
+    resolution see the same token pair.
+    """
     if last_refresh is None:
         last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     with _auth_store_lock():
@@ -1457,6 +1489,20 @@ def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None) -> None
         state["last_refresh"] = last_refresh
         state["auth_mode"] = "chatgpt"
         _save_provider_state(auth_store, "openai-codex", state)
+
+        pool = auth_store.get("credential_pool")
+        if not isinstance(pool, dict):
+            pool = {}
+            auth_store["credential_pool"] = pool
+        entries = pool.get("openai-codex")
+        if isinstance(entries, list) and entries:
+            current = dict(entries[0]) if isinstance(entries[0], dict) else {}
+            current["access_token"] = tokens.get("access_token")
+            current["refresh_token"] = tokens.get("refresh_token")
+            current["last_refresh"] = last_refresh
+            current["auth_mode"] = "chatgpt"
+            entries[0] = current
+            pool["openai-codex"] = entries
         _save_auth_store(auth_store)
 
 
