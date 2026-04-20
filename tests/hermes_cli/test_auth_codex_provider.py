@@ -72,6 +72,39 @@ def test_read_codex_tokens_missing(tmp_path, monkeypatch):
     assert exc.value.code == "codex_auth_missing"
 
 
+def test_read_codex_tokens_falls_back_to_credential_pool(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    (hermes_home / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {},
+        "credential_pool": {
+            "openai-codex": [{
+                "source": "manual:device_code",
+                "access_token": "pool-access",
+                "refresh_token": "pool-refresh",
+                "last_refresh": "2026-03-23T10:00:00Z",
+                "auth_mode": "chatgpt",
+                "label": "codex@example.com",
+            }],
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    data = _read_codex_tokens()
+
+    assert data["tokens"]["access_token"] == "pool-access"
+    assert data["tokens"]["refresh_token"] == "pool-refresh"
+    assert data["last_refresh"] == "2026-03-23T10:00:00Z"
+
+    auth_store = json.loads((hermes_home / "auth.json").read_text())
+    provider_state = auth_store["providers"]["openai-codex"]
+    assert provider_state["tokens"]["access_token"] == "pool-access"
+    assert provider_state["tokens"]["refresh_token"] == "pool-refresh"
+    assert provider_state["last_refresh"] == "2026-03-23T10:00:00Z"
+    assert provider_state["auth_mode"] == "chatgpt"
+
+
 def test_resolve_codex_runtime_credentials_missing_access_token(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes"
     _setup_hermes_auth(hermes_home, access_token="")
@@ -139,6 +172,47 @@ def test_save_codex_tokens_roundtrip(tmp_path, monkeypatch):
 
     assert data["tokens"]["access_token"] == "at123"
     assert data["tokens"]["refresh_token"] == "rt456"
+
+
+def test_save_codex_tokens_updates_existing_credential_pool_entry(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    (hermes_home / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {},
+        "credential_pool": {
+            "openai-codex": [{
+                "source": "manual:device_code",
+                "label": "codex@example.com",
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "last_refresh": "2026-03-22T10:00:00Z",
+                "auth_mode": "chatgpt",
+            }],
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    _save_codex_tokens(
+        {"access_token": "new-access", "refresh_token": "new-refresh"},
+        last_refresh="2026-03-23T10:00:00Z",
+    )
+
+    auth_store = json.loads((hermes_home / "auth.json").read_text())
+    provider_state = auth_store["providers"]["openai-codex"]
+    pool_entry = auth_store["credential_pool"]["openai-codex"][0]
+
+    assert provider_state["tokens"]["access_token"] == "new-access"
+    assert provider_state["tokens"]["refresh_token"] == "new-refresh"
+    assert provider_state["last_refresh"] == "2026-03-23T10:00:00Z"
+    assert provider_state["auth_mode"] == "chatgpt"
+
+    assert pool_entry["access_token"] == "new-access"
+    assert pool_entry["refresh_token"] == "new-refresh"
+    assert pool_entry["last_refresh"] == "2026-03-23T10:00:00Z"
+    assert pool_entry["auth_mode"] == "chatgpt"
+    assert pool_entry["source"] == "manual:device_code"
+    assert pool_entry["label"] == "codex@example.com"
 
 
 def test_import_codex_cli_tokens(tmp_path, monkeypatch):
